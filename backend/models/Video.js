@@ -5,6 +5,7 @@ const videoSchema = new mongoose.Schema(
     title: { type: String, required: true, trim: true, maxlength: 100 },
     description: { type: String, default: '', maxlength: 5000 },
     videoUrl: { type: String, required: true },
+    masterPlaylist: { type: String, default: '' },
     thumbnailUrl: { type: String, default: '' },
     duration: { type: Number, default: 0 },
     category: { type: String, default: 'Other' },
@@ -19,6 +20,12 @@ const videoSchema = new mongoose.Schema(
     },
     uploaderName: { type: String, required: true },
     uploaderAvatar: { type: String, default: '' },
+    status: {
+      type: String,
+      enum: ['processing', 'ready', 'failed'],
+      default: 'ready',
+    },
+    qualities: [{ type: String }],
   },
   { timestamps: true }
 );

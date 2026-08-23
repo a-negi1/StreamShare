@@ -1,24 +1,7 @@
 const Video = require('../models/Video');
-const cloudinary = require('cloudinary').v2;
-
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-});
-
-const deleteFromCloudinary = async (url) => {
-  if (!url) return;
-  try {
-    const parts = url.split('/');
-    const filename = parts[parts.length - 1].split('.')[0];
-    const folder = parts[parts.length - 2];
-    const publicId = `${folder}/${filename}`;
-    await cloudinary.uploader.destroy(publicId, { resource_type: 'video' });
-  } catch (e) {
-    console.error('Cloudinary delete error:', e.message);
-  }
-};
+const fs = require('fs');
+const path = require('path');
+const { transcodeToHLS, HLS_DIR } = require('../utils/hlsTranscoder');
 
 exports.getVideos = async (req, res) => {
   try {
@@ -28,7 +11,7 @@ exports.getVideos = async (req, res) => {
     const search = req.query.search || '';
     const category = req.query.category || '';
 
-    const query = {};
+    const query = { status: 'ready' };
     if (search) query.$text = { $search: search };
     if (category && category !== 'All') query.category = category;
 
@@ -60,24 +43,49 @@ exports.getVideoById = async (req, res) => {
 
 exports.createVideo = async (req, res) => {
   try {
-    const { title, description, category, tags, duration } = req.body;
+    const { title, description, category, tags } = req.body;
     if (!req.file) {
       return res.status(400).json({ message: 'Video file is required' });
     }
+    if (!title) {
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ message: 'Title is required' });
+    }
+
     const video = await Video.create({
       title,
-      description,
-      category,
+      description: description || '',
+      category: category || 'Other',
       tags: tags ? tags.split(',').map((t) => t.trim()) : [],
-      duration: Number(duration) || 0,
       videoUrl: req.file.path,
-      thumbnailUrl: req.file.path.replace(/\.[^/.]+$/, '.jpg'),
       uploader: req.user._id,
       uploaderName: req.user.username,
       uploaderAvatar: req.user.avatar,
+      status: 'processing',
+      qualities: [],
     });
+
     res.status(201).json(video);
+
+    transcodeToHLS(req.file.path)
+      .then(async (result) => {
+        video.masterPlaylist = result.masterPlaylist;
+        video.thumbnailUrl = result.thumbnail || '';
+        video.duration = result.duration;
+        video.status = 'ready';
+        video.qualities = ['240p', '360p', '480p', '720p'];
+        await video.save();
+        console.log(`Transcode complete for video ${video._id}`);
+      })
+      .catch(async (err) => {
+        console.error('Transcode failed:', err.message);
+        video.status = 'failed';
+        await video.save();
+      });
   } catch (err) {
+    if (req.file && fs.existsSync(req.file.path)) {
+      try { fs.unlinkSync(req.file.path); } catch (e) {}
+    }
     res.status(500).json({ message: err.message });
   }
 };
@@ -108,7 +116,9 @@ exports.deleteVideo = async (req, res) => {
     if (video.uploader.toString() !== req.user._id.toString()) {
       return res.status(403).json({ message: 'Not authorized' });
     }
-    await deleteFromCloudinary(video.videoUrl);
+    if (req.file && fs.existsSync(req.file.path)) {
+      try { fs.unlinkSync(req.file.path); } catch (e) {}
+    }
     await video.deleteOne();
     res.json({ message: 'Video deleted' });
   } catch (err) {
