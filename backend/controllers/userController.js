@@ -1,6 +1,7 @@
 const User = require('../models/User');
 const jwt = require('jsonwebtoken');
-const cloudinary = require('cloudinary').v2;
+const fs = require('fs');
+const { uploadImage } = require('../utils/cloudinaryStorage');
 
 const generateToken = (id) =>
   jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: '30d' });
@@ -51,6 +52,16 @@ exports.getMe = async (req, res) => {
   res.json(req.user);
 };
 
+exports.getUserById = async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id).select('-password -email');
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    res.json(user);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
 exports.updateProfile = async (req, res) => {
   try {
     const user = await User.findById(req.user._id);
@@ -60,7 +71,9 @@ exports.updateProfile = async (req, res) => {
       user.channelDescription = req.body.channelDescription;
     }
     if (req.file) {
-      user.avatar = req.file.path;
+      const result = await uploadImage(req.file.path, 'streamshare/avatars');
+      user.avatar = result.secure_url;
+      try { fs.unlinkSync(req.file.path); } catch (e) {}
     }
     await user.save();
     res.json({

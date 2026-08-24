@@ -1,11 +1,10 @@
 const multer = require('multer');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
+const os = require('os');
 
-const UPLOAD_DIR = path.join(__dirname, '..', 'uploads');
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
+const tmpStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, os.tmpdir()),
   filename: (req, file, cb) => {
     const ext = path.extname(file.originalname);
     cb(null, `${uuidv4()}${ext}`);
@@ -13,20 +12,20 @@ const storage = multer.diskStorage({
 });
 
 const uploadVideo = multer({
-  storage,
+  storage: tmpStorage,
   limits: { fileSize: 500 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     if (file.mimetype.startsWith('video/')) cb(null, true);
-    else cb(new Error('Only video files allowed'));
+    else cb(new Error('Only video files are allowed'));
   },
 });
 
 const uploadImage = multer({
-  storage,
+  storage: tmpStorage,
   limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     if (file.mimetype.startsWith('image/')) cb(null, true);
-    else cb(new Error('Only image files allowed'));
+    else cb(new Error('Only image files are allowed'));
   },
 });
 

@@ -1,7 +1,7 @@
 const Video = require('../models/Video');
 const fs = require('fs');
-const path = require('path');
-const { transcodeToHLS, HLS_DIR } = require('../utils/hlsTranscoder');
+const { transcodeToHLS } = require('../utils/hlsTranscoder');
+const { uploadVideo: uploadToCloud, uploadImage } = require('../utils/cloudinaryStorage');
 
 exports.getVideos = async (req, res) => {
   try {
@@ -32,7 +32,7 @@ exports.getVideoById = async (req, res) => {
   try {
     const video = await Video.findById(req.params.id).populate(
       'uploader',
-      'username avatar subscribers'
+      'username avatar subscribers channelDescription'
     );
     if (!video) return res.status(404).json({ message: 'Video not found' });
     res.json(video);
@@ -44,20 +44,20 @@ exports.getVideoById = async (req, res) => {
 exports.createVideo = async (req, res) => {
   try {
     const { title, description, category, tags } = req.body;
-    if (!req.file) {
-      return res.status(400).json({ message: 'Video file is required' });
-    }
+    if (!req.file) return res.status(400).json({ message: 'Video file is required' });
     if (!title) {
       fs.unlinkSync(req.file.path);
       return res.status(400).json({ message: 'Title is required' });
     }
+
+    const cloudUpload = await uploadToCloud(req.file.path);
 
     const video = await Video.create({
       title,
       description: description || '',
       category: category || 'Other',
       tags: tags ? tags.split(',').map((t) => t.trim()) : [],
-      videoUrl: req.file.path,
+      videoUrl: cloudUpload.secure_url,
       uploader: req.user._id,
       uploaderName: req.user.username,
       uploaderAvatar: req.user.avatar,
@@ -81,11 +81,16 @@ exports.createVideo = async (req, res) => {
         console.error('Transcode failed:', err.message);
         video.status = 'failed';
         await video.save();
+      })
+      .finally(() => {
+        try {
+          if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+        } catch (e) {}
       });
   } catch (err) {
-    if (req.file && fs.existsSync(req.file.path)) {
-      try { fs.unlinkSync(req.file.path); } catch (e) {}
-    }
+    try {
+      if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+    } catch (e) {}
     res.status(500).json({ message: err.message });
   }
 };
@@ -115,9 +120,6 @@ exports.deleteVideo = async (req, res) => {
     if (!video) return res.status(404).json({ message: 'Video not found' });
     if (video.uploader.toString() !== req.user._id.toString()) {
       return res.status(403).json({ message: 'Not authorized' });
-    }
-    if (req.file && fs.existsSync(req.file.path)) {
-      try { fs.unlinkSync(req.file.path); } catch (e) {}
     }
     await video.deleteOne();
     res.json({ message: 'Video deleted' });

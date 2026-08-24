@@ -1,10 +1,9 @@
 const ffmpeg = require('fluent-ffmpeg');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const { v4: uuidv4 } = require('uuid');
-
-const HLS_DIR = path.join(__dirname, '..', 'hls');
-if (!fs.existsSync(HLS_DIR)) fs.mkdirSync(HLS_DIR, { recursive: true });
+const { uploadRaw, uploadImage } = require('./cloudinaryStorage');
 
 const QUALITY_LADDER = [
   { name: '240p', width: 426, height: 240, videoBitrate: '400k', audioBitrate: '64k' },
@@ -55,10 +54,9 @@ function transcodeVariant(inputPath, outputDir, variant) {
 
 function generateThumbnail(inputPath, outputDir, duration) {
   return new Promise((resolve, reject) => {
-    const thumbnailPath = path.join(outputDir, 'thumb.jpg');
     const seekTime = Math.max(1, Math.floor(duration / 4));
     ffmpeg(inputPath)
-      .on('end', () => resolve(thumbnailPath))
+      .on('end', () => resolve(path.join(outputDir, 'thumb.jpg')))
       .on('error', (err) => reject(err))
       .screenshots({
         timestamps: [seekTime],
@@ -69,52 +67,92 @@ function generateThumbnail(inputPath, outputDir, duration) {
   });
 }
 
-async function transcodeToHLS(inputPath) {
-  const id = uuidv4();
-  const outputDir = path.join(HLS_DIR, id);
-  if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
+async function uploadHLSOutput(tmpDir, videoId, selectedLadder) {
+  const variantUrls = {};
 
-  const metadata = await probeMetadata(inputPath);
-  const duration = metadata.format.duration || 0;
+  for (const variant of selectedLadder) {
+    const variantDir = path.join(tmpDir, variant.name);
+    const segFiles = fs.readdirSync(variantDir).filter((f) => f.endsWith('.ts'));
 
-  let selectedLadder = QUALITY_LADDER.filter((v) => v.height <= 720);
-  if (duration === 0) selectedLadder = QUALITY_LADDER.slice(0, 2);
+    const segmentUrlMap = {};
+    for (const segFile of segFiles) {
+      const baseName = path.basename(segFile, '.ts');
+      const publicId = `hls/${videoId}/${variant.name}/${baseName}`;
+      const result = await uploadRaw(path.join(variantDir, segFile), publicId);
+      segmentUrlMap[segFile] = result.secure_url;
+    }
 
-  await Promise.all(
-    selectedLadder.map((variant) =>
-      transcodeVariant(inputPath, outputDir, variant)
-    )
-  );
+    let m3u8Content = fs.readFileSync(path.join(variantDir, 'index.m3u8'), 'utf-8');
+    for (const [segFile, segUrl] of Object.entries(segmentUrlMap)) {
+      m3u8Content = m3u8Content.replace(new RegExp(segFile.replace('.', '\\.'), 'g'), segUrl);
+    }
 
-  const masterContent = generateMasterPlaylist(selectedLadder);
-  fs.writeFileSync(path.join(outputDir, 'master.m3u8'), masterContent);
+    const rewrittenPath = path.join(variantDir, 'index_abs.m3u8');
+    fs.writeFileSync(rewrittenPath, m3u8Content);
 
-  let thumbnailPath = null;
-  try {
-    thumbnailPath = await generateThumbnail(inputPath, outputDir, duration);
-  } catch (e) {
-    console.error('Thumbnail generation failed:', e.message);
+    const variantResult = await uploadRaw(
+      rewrittenPath,
+      `hls/${videoId}/${variant.name}/index`
+    );
+    variantUrls[variant.name] = variantResult.secure_url;
   }
 
-  return {
-    id,
-    duration: Math.round(duration),
-    masterPlaylist: `/hls/${id}/master.m3u8`,
-    thumbnail: thumbnailPath ? `/hls/${id}/thumb.jpg` : null,
-  };
+  return variantUrls;
 }
 
-function generateMasterPlaylist(ladder) {
+function generateMasterPlaylist(ladder, variantUrls) {
   let content = '#EXTM3U\n#EXT-X-VERSION:3\n';
   ladder.forEach((variant) => {
     const bandwidth =
-      parseInt(variant.videoBitrate) * 1000 +
-      parseInt(variant.audioBitrate) * 1000;
+      parseInt(variant.videoBitrate) * 1000 + parseInt(variant.audioBitrate) * 1000;
     const resolution = `${variant.width}x${variant.height}`;
     content += `#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth},RESOLUTION=${resolution},CODECS="avc1.4d401f,mp4a.40.2"\n`;
-    content += `${variant.name}/index.m3u8\n`;
+    content += `${variantUrls[variant.name]}\n`;
   });
   return content;
 }
 
-module.exports = { transcodeToHLS, HLS_DIR };
+async function transcodeToHLS(inputPath) {
+  const videoId = uuidv4();
+  const tmpDir = path.join(os.tmpdir(), `streamshare_${videoId}`);
+  fs.mkdirSync(tmpDir, { recursive: true });
+
+  try {
+    const metadata = await probeMetadata(inputPath);
+    const duration = metadata.format.duration || 0;
+    const selectedLadder = duration > 0 ? QUALITY_LADDER : QUALITY_LADDER.slice(0, 2);
+
+    await Promise.all(
+      selectedLadder.map((variant) => transcodeVariant(inputPath, tmpDir, variant))
+    );
+
+    const variantUrls = await uploadHLSOutput(tmpDir, videoId, selectedLadder);
+
+    const masterContent = generateMasterPlaylist(selectedLadder, variantUrls);
+    const masterPath = path.join(tmpDir, 'master.m3u8');
+    fs.writeFileSync(masterPath, masterContent);
+    const masterResult = await uploadRaw(masterPath, `hls/${videoId}/master`);
+
+    let thumbnailUrl = null;
+    try {
+      const thumbLocalPath = await generateThumbnail(inputPath, tmpDir, duration);
+      const thumbResult = await uploadImage(thumbLocalPath, 'streamshare/thumbnails');
+      thumbnailUrl = thumbResult.secure_url;
+    } catch (e) {
+      console.error('Thumbnail generation failed:', e.message);
+    }
+
+    return {
+      id: videoId,
+      duration: Math.round(duration),
+      masterPlaylist: masterResult.secure_url,
+      thumbnail: thumbnailUrl,
+    };
+  } finally {
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch (e) {}
+  }
+}
+
+module.exports = { transcodeToHLS };
