@@ -4,3 +4,10 @@ dist/
 dist-ssr/
 *.local
 .DS_Store
+backend/uploads/*
+backend/hls/*
+backend/.env*
+!backend/uploads/.gitkeep
+!backend/hls/.gitkeep
+backend/.env.example
+backend/.env.example
